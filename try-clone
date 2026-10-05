@@ -11,19 +11,19 @@ die() {
 }
 
 need() {
-  command -v "$1" >/dev/null 2>&1 || die "Missing $1."
+  command -v "$1" > /dev/null 2>&1 || die "Missing $1."
 }
 
 need gh
 need try
 
-gh auth status >/dev/null 2>&1 || die "gh is not logged in. Run: gh auth login"
+gh auth status > /dev/null 2>&1 || die "gh is not logged in. Run: gh auth login"
 
-try_bin="$(type -P try 2>/dev/null || true)"
+try_bin="$(type -P try 2> /dev/null || true)"
 [[ -n "$try_bin" ]] || die "try is not on PATH."
 
 eval "$("$try_bin" init "$TRY_PATH")"
-declare -F try >/dev/null || die "try init did not register a shell function."
+declare -F try > /dev/null || die "try init did not register a shell function."
 
 mkdir -p "$TRY_PATH"
 
