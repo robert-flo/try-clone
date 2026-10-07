@@ -157,6 +157,23 @@ EOF
   assert_equals "" "${PROJECT_MAP["try-clone"]:-}" "unassigned repo is empty"
 }
 
+test_default_projects_config_fallback() {
+  printf 'Testing fallback to default projects.conf...\n'
+  local temp_dir detected_project
+  temp_dir="$(make_temp_dir)"
+  detected_project="$(
+    HOME="$temp_dir" bash -c '
+      unset TRY_CLONE_CONFIG
+      declare -A PROJECT_MAP=()
+      source <(sed -n "/load_projects_config() {/,/^}/p; /init_projects_config() {/,/^}/p" "'"${TRY_CLONE}"'")
+      SCRIPT_DIR="'"${REPO_ROOT}"'"
+      init_projects_config
+      printf "%s" "${PROJECT_MAP["omarchy"]:-}"
+    '
+  )"
+  assert_equals "pj-omarchy" "$detected_project" "Default config should resolve omarchy to pj-omarchy"
+}
+
 test_resolve_rel_path() {
   printf 'Testing resolve_rel_path...\n'
   declare -A PROJECT_MAP=()
@@ -424,6 +441,7 @@ main() {
   test_default_try_path
   test_slug_logic
   test_load_projects_config
+  test_default_projects_config_fallback
   test_resolve_rel_path
   test_tree_preview
   test_sync_clean_and_dirty_repos
