@@ -254,6 +254,69 @@ EOF
   assert_contains "$output2" "Done. listed=2 cloned=0 skipped=2 failed=0" "Summary of second run"
 }
 
+test_tree_preview() {
+  printf 'Testing terminal tree preview...\n'
+  local temp_dir mock_bin try_path config_file
+  temp_dir="$(make_temp_dir)"
+
+  mock_bin="${temp_dir}/bin"
+  try_path="${temp_dir}/tries"
+  config_file="${temp_dir}/projects.conf"
+  mkdir -p "$mock_bin" "$try_path"
+
+  cat << 'EOF' > "$config_file"
+pj-demo=repo-b
+EOF
+
+  cat << 'EOF' > "${mock_bin}/gh"
+#!/usr/bin/env bash
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+if [[ "$1" == "repo" && "$2" == "list" ]]; then
+  owner="$3"
+  if [[ "$owner" == "robert-flo" ]]; then
+    printf 'robert-flo/repo-a\tfalse\tfalse\n'
+    printf 'robert-flo/repo-b\ttrue\tfalse\n'
+  fi
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${mock_bin}/gh"
+
+  cat << 'EOF' > "${mock_bin}/try"
+#!/usr/bin/env bash
+if [[ "$1" == "init" ]]; then
+  cat <<'INNER'
+try() {
+  return 0
+}
+INNER
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${mock_bin}/try"
+
+  local output
+  output="$(TRY_CLONE_CONFIG="$config_file" TRY_PATH="$try_path" PATH="${mock_bin}:/usr/bin:/bin" "${TRY_CLONE}")"
+
+  assert_contains "$output" "--- pj-demo" "Tree header for pj-demo"
+  assert_contains "$output" "      fo-repo-b" "Indented repo fo-repo-b under pj-demo"
+  assert_contains "$output" "--- [raíz]" "Tree header for root repos"
+  assert_contains "$output" "      rf-repo-a" "Indented repo rf-repo-a under root"
+
+  # Ensure preview appears before operations
+  local tree_pos first_op_pos
+  tree_pos="${output%%--- pj-demo*}"
+  first_op_pos="${output%%TRY   *}"
+  if ((${#tree_pos} >= ${#first_op_pos})); then
+    printf 'Assertion failed: tree preview must appear before clone/sync operations\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_missing_gh
   test_missing_try
@@ -262,6 +325,7 @@ main() {
   test_slug_logic
   test_load_projects_config
   test_resolve_rel_path
+  test_tree_preview
   test_e2e_clone_and_skip
   printf 'All try-clone behavioral tests passed!\n'
 }

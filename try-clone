@@ -115,36 +115,84 @@ list_repos() {
 
 init_projects_config
 
+declare -a ALL_REPOS=()
+declare -a KNOWN_PROJECTS=()
+declare -A PROJECT_GROUPS=()
+declare -a ROOT_REPOS=()
+
+collect_repos() {
+  local owner="" full_name="" is_fork="" is_private=""
+  local slug="" project=""
+
+  for owner in "${OWNERS[@]}"; do
+    while IFS=$'\t' read -r full_name is_fork is_private; do
+      [[ -z "$full_name" ]] && continue
+      ALL_REPOS+=("${full_name}"$'\t'"${is_fork}"$'\t'"${is_private}")
+
+      slug="$(slug_for "$full_name" "$is_fork")"
+      project="$(project_for "$full_name")"
+
+      if [[ -n "$project" ]]; then
+        if [[ -z "${PROJECT_GROUPS["$project"]:-}" ]]; then
+          KNOWN_PROJECTS+=("$project")
+        fi
+        PROJECT_GROUPS["$project"]+="${slug}"$'\n'
+      else
+        ROOT_REPOS+=("$slug")
+      fi
+    done < <(list_repos "$owner")
+  done
+}
+
+print_tree() {
+  local project="" slug=""
+
+  for project in "${KNOWN_PROJECTS[@]}"; do
+    printf '%s\n' "--- ${project}"
+    while IFS= read -r slug; do
+      [[ -n "$slug" ]] && printf '      %s\n' "$slug"
+    done <<< "${PROJECT_GROUPS["$project"]}"
+    printf '\n'
+  done
+
+  if ((${#ROOT_REPOS[@]} > 0)); then
+    printf '%s\n' "--- [raíz]"
+    for slug in "${ROOT_REPOS[@]}"; do
+      printf '      %s\n' "$slug"
+    done
+    printf '\n'
+  fi
+}
+
+collect_repos
+print_tree
+
 ok=0
 skip=0
 fail=0
-total=0
+total=${#ALL_REPOS[@]}
 
-for owner in "${OWNERS[@]}"; do
-  while IFS=$'\t' read -r full_name is_fork is_private; do
-    [[ -z "$full_name" ]] && continue
-    ((++total))
+for entry in "${ALL_REPOS[@]}"; do
+  IFS=$'\t' read -r full_name is_fork is_private <<< "$entry"
+  rel_path="$(resolve_rel_path "$full_name" "$is_fork")"
+  dest="${TRY_PATH}/${rel_path}"
+  uri="git@github.com:${full_name}.git"
 
-    rel_path="$(resolve_rel_path "$full_name" "$is_fork")"
-    dest="${TRY_PATH}/${rel_path}"
-    uri="git@github.com:${full_name}.git"
+  if [[ -d "${dest}/.git" ]]; then
+    printf 'SKIP  %s  (%s)\n' "$full_name" "$dest"
+    ((++skip))
+    continue
+  fi
 
-    if [[ -d "${dest}/.git" ]]; then
-      printf 'SKIP  %s  (%s)\n' "$full_name" "$dest"
-      ((++skip))
-      continue
-    fi
+  printf 'TRY   %s  private=%s fork=%s  ->  %s\n' \
+    "$full_name" "$is_private" "$is_fork" "$rel_path"
 
-    printf 'TRY   %s  private=%s fork=%s  ->  %s\n' \
-      "$full_name" "$is_private" "$is_fork" "$rel_path"
-
-    if try clone "$uri" "$rel_path"; then
-      ((++ok))
-    else
-      printf 'FAIL  %s\n' "$full_name" >&2
-      ((++fail))
-    fi
-  done < <(list_repos "$owner")
+  if try clone "$uri" "$rel_path"; then
+    ((++ok))
+  else
+    printf 'FAIL  %s\n' "$full_name" >&2
+    ((++fail))
+  fi
 done
 
 printf 'Done. listed=%s cloned=%s skipped=%s failed=%s\n' "$total" "$ok" "$skip" "$fail"
