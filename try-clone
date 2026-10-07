@@ -164,10 +164,66 @@ print_tree() {
   fi
 }
 
+detect_base_branch() {
+  local target_dir="$1"
+  local branch=""
+
+  branch="$(git -C "$target_dir" symbolic-ref --short refs/remotes/origin/HEAD 2> /dev/null || true)"
+  branch="${branch#origin/}"
+  if [[ -n "$branch" ]]; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+
+  if git -C "$target_dir" show-ref --verify --quiet "refs/heads/main" || git -C "$target_dir" show-ref --verify --quiet "refs/remotes/origin/main"; then
+    printf 'main\n'
+    return 0
+  fi
+
+  if git -C "$target_dir" show-ref --verify --quiet "refs/heads/master" || git -C "$target_dir" show-ref --verify --quiet "refs/remotes/origin/master"; then
+    printf 'master\n'
+    return 0
+  fi
+
+  branch="$(git -C "$target_dir" branch --show-current 2> /dev/null || true)"
+  printf '%s\n' "$branch"
+}
+
+sync_repo() {
+  local dest="$1"
+  local full_name="$2"
+  local base_branch=""
+  local current_branch=""
+
+  if git -C "$dest" remote 2> /dev/null | grep -q "^upstream$"; then
+    git -C "$dest" config remote.upstream.skipFetchAll true
+  fi
+
+  if git -C "$dest" remote 2> /dev/null | grep -q .; then
+    git -C "$dest" fetch --all --prune > /dev/null 2>&1 || true
+  fi
+
+  if git -C "$dest" diff --quiet && git -C "$dest" diff --cached --quiet; then
+    base_branch="$(detect_base_branch "$dest")"
+    current_branch="$(git -C "$dest" branch --show-current 2> /dev/null || true)"
+    if [[ -n "$base_branch" ]] && [[ "$current_branch" != "$base_branch" ]]; then
+      git -C "$dest" checkout "$base_branch" > /dev/null 2>&1 || true
+    fi
+    printf 'SYNC  %s  (%s)\n' "$full_name" "$dest"
+    return 0
+  else
+    current_branch="$(git -C "$dest" branch --show-current 2> /dev/null || true)"
+    printf 'WARN  %s  working tree dirty; keeping branch %s\n' "$full_name" "${current_branch:-HEAD}" >&2
+    printf 'SKIP  %s  (%s)\n' "$full_name" "$dest"
+    return 1
+  fi
+}
+
 collect_repos
 print_tree
 
 ok=0
+synced=0
 skip=0
 fail=0
 total=${#ALL_REPOS[@]}
@@ -179,8 +235,11 @@ for entry in "${ALL_REPOS[@]}"; do
   uri="git@github.com:${full_name}.git"
 
   if [[ -d "${dest}/.git" ]]; then
-    printf 'SKIP  %s  (%s)\n' "$full_name" "$dest"
-    ((++skip))
+    if sync_repo "$dest" "$full_name"; then
+      ((++synced))
+    else
+      ((++skip))
+    fi
     continue
   fi
 
@@ -195,7 +254,7 @@ for entry in "${ALL_REPOS[@]}"; do
   fi
 done
 
-printf 'Done. listed=%s cloned=%s skipped=%s failed=%s\n' "$total" "$ok" "$skip" "$fail"
+printf 'Done. listed=%s cloned=%s synced=%s skipped=%s failed=%s\n' "$total" "$ok" "$synced" "$skip" "$fail"
 printf 'Directory: %s\n' "$TRY_PATH"
 printf 'Open the picker with: try\n'
 exit "$fail"
