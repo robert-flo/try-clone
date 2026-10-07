@@ -2,8 +2,13 @@
 # Clone GitHub repos into a try workspace.
 set -euo pipefail
 
+SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+if [[ "$SCRIPT_DIR" == "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="."
+fi
 OWNERS=(robert-flo 25asab015-forks)
-TRY_PATH="${TRY_PATH:-$HOME/Dropbox/Work/tries}"
+TRY_PATH="${TRY_PATH:-$HOME/Work/tries}"
+TRY_CLONE_CONFIG="${TRY_CLONE_CONFIG:-$HOME/.config/try-clone/projects.conf}"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -27,11 +32,79 @@ declare -F try > /dev/null || die "try init did not register a shell function."
 
 mkdir -p "$TRY_PATH"
 
+declare -A PROJECT_MAP=()
+
+load_projects_config() {
+  local config_source="$1"
+  local line="" trimmed="" project="" repos_str="" repo="" clean_repo=""
+  local -a repo_array=()
+
+  if [[ ! -f "$config_source" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    trimmed="${line%%#*}"
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [[ -z "$trimmed" ]] && continue
+    [[ "$trimmed" != *"="* ]] && continue
+
+    project="${trimmed%%=*}"
+    project="${project#"${project%%[![:space:]]*}"}"
+    project="${project%"${project##*[![:space:]]}"}"
+
+    repos_str="${trimmed#*=}"
+    IFS=',' read -r -a repo_array <<< "$repos_str"
+    for repo in "${repo_array[@]}"; do
+      clean_repo="${repo#"${repo%%[![:space:]]*}"}"
+      clean_repo="${clean_repo%"${clean_repo##*[![:space:]]}"}"
+      clean_repo="${clean_repo##*/}"
+      [[ -n "$clean_repo" ]] && PROJECT_MAP["$clean_repo"]="$project"
+    done
+  done < "$config_source"
+}
+
+init_projects_config() {
+  if [[ -f "$TRY_CLONE_CONFIG" ]]; then
+    load_projects_config "$TRY_CLONE_CONFIG"
+  elif [[ -f "${SCRIPT_DIR}/projects.conf" ]]; then
+    load_projects_config "${SCRIPT_DIR}/projects.conf"
+  fi
+}
+
 slug_for() {
-  local full_name="$1" is_fork="$2"
-  local slug="${full_name//\//-}"
-  [[ "$is_fork" == true ]] && slug="fork-${slug}"
-  printf '%s\n' "$slug"
+  local full_name="$1"
+  local is_fork="$2"
+  local repo_name=""
+  local prefix="rf-"
+
+  repo_name="${full_name##*/}"
+  [[ "$is_fork" == "true" ]] && prefix="fo-"
+  printf '%s\n' "${prefix}${repo_name}"
+}
+
+project_for() {
+  local full_name="$1"
+  local repo_name=""
+  repo_name="${full_name##*/}"
+  printf '%s\n' "${PROJECT_MAP["$repo_name"]:-}"
+}
+
+resolve_rel_path() {
+  local full_name="$1"
+  local is_fork="$2"
+  local slug=""
+  local project=""
+
+  slug="$(slug_for "$full_name" "$is_fork")"
+  project="$(project_for "$full_name")"
+
+  if [[ -n "$project" ]]; then
+    printf '%s/%s\n' "$project" "$slug"
+  else
+    printf '%s\n' "$slug"
+  fi
 }
 
 list_repos() {
@@ -39,6 +112,8 @@ list_repos() {
     --json nameWithOwner,isFork,isPrivate \
     --jq '.[] | [.nameWithOwner, (.isFork|tostring), (.isPrivate|tostring)] | @tsv'
 }
+
+init_projects_config
 
 ok=0
 skip=0
@@ -50,8 +125,8 @@ for owner in "${OWNERS[@]}"; do
     [[ -z "$full_name" ]] && continue
     ((++total))
 
-    slug="$(slug_for "$full_name" "$is_fork")"
-    dest="${TRY_PATH}/${slug}"
+    rel_path="$(resolve_rel_path "$full_name" "$is_fork")"
+    dest="${TRY_PATH}/${rel_path}"
     uri="git@github.com:${full_name}.git"
 
     if [[ -d "${dest}/.git" ]]; then
@@ -61,9 +136,9 @@ for owner in "${OWNERS[@]}"; do
     fi
 
     printf 'TRY   %s  private=%s fork=%s  ->  %s\n' \
-      "$full_name" "$is_private" "$is_fork" "$slug"
+      "$full_name" "$is_private" "$is_fork" "$rel_path"
 
-    if try clone "$uri" "$slug"; then
+    if try clone "$uri" "$rel_path"; then
       ((++ok))
     else
       printf 'FAIL  %s\n' "$full_name" >&2
