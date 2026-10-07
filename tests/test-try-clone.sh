@@ -218,7 +218,13 @@ try() {
   if [[ "$1" == "clone" ]]; then
     local uri="$2"
     local slug="$3"
-    mkdir -p "${TRY_PATH}/${slug}/.git"
+    mkdir -p "${TRY_PATH}/${slug}"
+    git -C "${TRY_PATH}/${slug}" init -b master > /dev/null 2>&1
+    git -C "${TRY_PATH}/${slug}" config user.email "test@example.com"
+    git -C "${TRY_PATH}/${slug}" config user.name "Test Runner"
+    touch "${TRY_PATH}/${slug}/init"
+    git -C "${TRY_PATH}/${slug}" add init
+    git -C "${TRY_PATH}/${slug}" commit -m "init" > /dev/null 2>&1
     return 0
   fi
 }
@@ -234,7 +240,7 @@ EOF
   output1="$(TRY_CLONE_CONFIG="$config_file" TRY_PATH="$try_path" PATH="${mock_bin}:/usr/bin:/bin" "${TRY_CLONE}")"
   assert_contains "$output1" "TRY   robert-flo/repo-a" "Should clone repo-a"
   assert_contains "$output1" "TRY   robert-flo/repo-b" "Should clone repo-b"
-  assert_contains "$output1" "Done. listed=2 cloned=2 skipped=0 failed=0" "Summary of first run"
+  assert_contains "$output1" "Done. listed=2 cloned=2 synced=0 skipped=0 failed=0" "Summary of first run"
 
   # Verify directories created
   if [[ ! -d "${try_path}/rf-repo-a/.git" ]]; then
@@ -246,12 +252,12 @@ EOF
     exit 1
   fi
 
-  # Second run: should skip both repos because .git exists
+  # Second run: should sync both repos because .git exists and trees are clean
   local output2
   output2="$(TRY_CLONE_CONFIG="$config_file" TRY_PATH="$try_path" PATH="${mock_bin}:/usr/bin:/bin" "${TRY_CLONE}")"
-  assert_contains "$output2" "SKIP  robert-flo/repo-a" "Should skip repo-a on rerun"
-  assert_contains "$output2" "SKIP  robert-flo/repo-b" "Should skip repo-b on rerun"
-  assert_contains "$output2" "Done. listed=2 cloned=0 skipped=2 failed=0" "Summary of second run"
+  assert_contains "$output2" "SYNC  robert-flo/repo-a" "Should sync repo-a on rerun"
+  assert_contains "$output2" "SYNC  robert-flo/repo-b" "Should sync repo-b on rerun"
+  assert_contains "$output2" "Done. listed=2 cloned=0 synced=2 skipped=0 failed=0" "Summary of second run"
 }
 
 test_tree_preview() {
@@ -317,6 +323,100 @@ EOF
   fi
 }
 
+test_sync_clean_and_dirty_repos() {
+  printf 'Testing existing repo synchronization and dirty working tree protection...\n'
+  local temp_dir mock_bin try_path clean_repo dirty_repo
+  temp_dir="$(make_temp_dir)"
+
+  mock_bin="${temp_dir}/bin"
+  try_path="${temp_dir}/tries"
+  mkdir -p "$mock_bin" "$try_path"
+
+  cat << 'EOF' > "${mock_bin}/gh"
+#!/usr/bin/env bash
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+if [[ "$1" == "repo" && "$2" == "list" ]]; then
+  owner="$3"
+  if [[ "$owner" == "robert-flo" ]]; then
+    printf 'robert-flo/repo-clean\tfalse\tfalse\n'
+    printf 'robert-flo/repo-dirty\tfalse\tfalse\n'
+  fi
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${mock_bin}/gh"
+
+  cat << 'EOF' > "${mock_bin}/try"
+#!/usr/bin/env bash
+if [[ "$1" == "init" ]]; then
+  cat <<'INNER'
+try() {
+  return 0
+}
+INNER
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${mock_bin}/try"
+
+  # Initialize repo-clean
+  clean_repo="${try_path}/rf-repo-clean"
+  mkdir -p "$clean_repo"
+  git -C "$clean_repo" init -b main > /dev/null 2>&1
+  git -C "$clean_repo" config user.email "test@example.com"
+  git -C "$clean_repo" config user.name "Test Runner"
+  echo "init" > "${clean_repo}/file.txt"
+  git -C "$clean_repo" add file.txt
+  git -C "$clean_repo" commit -m "initial commit" > /dev/null 2>&1
+  git -C "$clean_repo" branch -m master
+  # Add remote upstream
+  git -C "$clean_repo" remote add upstream "${temp_dir}"
+  # Switch to another branch
+  git -C "$clean_repo" checkout -b feature > /dev/null 2>&1
+
+  # Initialize repo-dirty
+  dirty_repo="${try_path}/rf-repo-dirty"
+  mkdir -p "$dirty_repo"
+  git -C "$dirty_repo" init -b main > /dev/null 2>&1
+  git -C "$dirty_repo" config user.email "test@example.com"
+  git -C "$dirty_repo" config user.name "Test Runner"
+  echo "init" > "${dirty_repo}/file.txt"
+  git -C "$dirty_repo" add file.txt
+  git -C "$dirty_repo" commit -m "initial commit" > /dev/null 2>&1
+  git -C "$dirty_repo" branch -m master
+  git -C "$dirty_repo" checkout -b work > /dev/null 2>&1
+  # Dirty uncommitted changes
+  echo "dirty modification" >> "${dirty_repo}/file.txt"
+
+  local output err_output
+  output="$(TRY_PATH="$try_path" PATH="${mock_bin}:/usr/bin:/bin" "${TRY_CLONE}" 2> "${temp_dir}/stderr.log")"
+  err_output="$(cat "${temp_dir}/stderr.log")"
+
+  # Clean repo assertions
+  local upstream_skip
+  upstream_skip="$(git -C "$clean_repo" config remote.upstream.skipFetchAll || true)"
+  assert_equals "true" "$upstream_skip" "remote.upstream.skipFetchAll should be set to true on clean repo"
+
+  local clean_current_branch
+  clean_current_branch="$(git -C "$clean_repo" branch --show-current)"
+  assert_equals "master" "$clean_current_branch" "Clean repo should be checked out to base branch master"
+  assert_contains "$output" "SYNC  robert-flo/repo-clean" "Should report SYNC for clean repo"
+
+  # Dirty repo assertions
+  local dirty_current_branch
+  dirty_current_branch="$(git -C "$dirty_repo" branch --show-current)"
+  assert_equals "work" "$dirty_current_branch" "Dirty repo should remain on its active branch work"
+  assert_contains "$err_output" "WARN  robert-flo/repo-dirty" "Should emit warning on stderr for dirty working tree"
+  assert_contains "$output" "SKIP  robert-flo/repo-dirty" "Should report SKIP for dirty repo"
+
+  # Summary assertion
+  assert_contains "$output" "Done. listed=2 cloned=0 synced=1 skipped=1 failed=0" "Execution summary includes synced and skipped"
+}
+
 main() {
   test_missing_gh
   test_missing_try
@@ -326,6 +426,7 @@ main() {
   test_load_projects_config
   test_resolve_rel_path
   test_tree_preview
+  test_sync_clean_and_dirty_repos
   test_e2e_clone_and_skip
   printf 'All try-clone behavioral tests passed!\n'
 }
